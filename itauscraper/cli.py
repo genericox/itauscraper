@@ -2,18 +2,8 @@
 import argparse
 
 from getpass import getpass
-from tabulate import tabulate
 
-from itauscraper.scraper import ItauScraper
-
-
-def csv(data):
-    lines = (','.join((str(col) for col in row)) for row in data)
-    return '\n'.join(lines)
-
-
-def table(data):
-    return tabulate(data, floatfmt='.2f')
+from itauscraper.scraper import Chrome, ItauHome
 
 
 def main():
@@ -26,29 +16,19 @@ def main():
     parser.add_argument('--conta', '-c', help='Conta sem dígito na forma 00000', required=True)
     parser.add_argument('--digito', '-d', help='Dígito da conta na forma 0', required=True)
     parser.add_argument('--senha', '-s', help='Senha eletrônica da conta no Itaú.')
-    parser.add_argument('--csv', help='Imprime os dados em CSV.', dest='output',
-                        action='store_const', const=csv, default=table)
+    parser.add_argument('--titular', '-t', help='Nome do titular (apenas para contas conjuntas)')
 
     args = parser.parse_args()
 
-    if not (args.extrato or args.cartao):
-        parser.exit(0, "Indique a operação: --extrato e/ou --cartao\n")
+    #if not (args.extrato or args.cartao):
+    #    parser.exit(0, "Indique a operação: --extrato e/ou --cartao\n")
 
-    output = args.output  # csv or table (default)
     senha = args.senha or getpass("Digite sua senha do Internet Banking: ")
 
-    itau = ItauScraper(args.agencia, args.conta, args.digito, senha)
-
-    assert itau.login()
-
-    if args.extrato:
-        data = itau.extrato()
-        print()
-        print(output(data))
-
-    if args.cartao:
-        summary, data = itau.cartao()
-        print()
-        print(output(summary.items()))
-        print()
-        print(output(data))
+    try:
+        itau = ItauHome(Chrome())
+        itau.login(args.agencia, args.conta+args.digito, args.titular, senha)
+        itau.go_to_ofx()
+        print(itau.salvar_ofx(1, 1, 2018))
+    finally:
+        itau.cleanup()

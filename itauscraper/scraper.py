@@ -1,86 +1,149 @@
-"""Lógica do navegação no site do Itaú."""
-import requests
+from pathlib import Path
+from contextlib import contextmanager
 
-from itauscraper.pages import CardMenuPage, StatementPage, MenuPage, LoginPage, FirstPage, CardStatement
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 
-class MobileSession(requests.Session):
-    """Session customizado para se passar por navegador de dispositivo móvel."""
-
+class Chrome(webdriver.Chrome):
     def __init__(self):
-        super().__init__()
+        options = webdriver.ChromeOptions()
+        options.add_argument('--disable-web-security')
+        options.add_experimental_option(
+            "prefs", {
+                'download.default_directory': str(Path().absolute()),
+            }
+        )
 
-        self.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/59.0.3071.115 Mobile Safari/537.36',
-            'Accept': 'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/59.0.3071.115 Mobile Safari/537.36',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Accept-Language': 'pt-BR,pt;q=0.8,en-US;q=0.6,en;q=0.4',
-        })
+        super().__init__(chrome_options=options)
+
+    def wait_until(self, method, timeout=10, interval=1):
+        return WebDriverWait(self, timeout, interval).until(method)
+
+    def element(self, locator):
+        return self.find_element(*locator)
+
+    @contextmanager
+    def frame(self, name):
+        self.switch_to.frame(name)
+        yield
+        self.switch_to.default_content()
+
+    @contextmanager
+    def tab(self):
+        current = self.current_window_handle
+        # open new tab
+        self.execute_script('window.open("about:blank", "_blank");')
+        # switch to new tab
+        self.switch_to_window(self.window_handles[-1])
+
+        yield
+
+        # close tab
+        self.close()
+        # switch back to previous tab
+        self.switch_to_window(current)
+
+    def wait_downloads(self):
+        self.get("chrome://downloads/")
+
+        cmd = """
+            var items = downloads.Manager.get().items_;
+            if (items.every(e => e.state === "COMPLETE"))
+                return items.map(e => e.file_path);     
+        """
+
+        # waits for all the files to be completed and returns the paths
+        return self.wait_until(lambda d: d.execute_script(cmd), timeout=120)
 
 
-class ItauScraper:
-    """Scraper do Itaú Pessoa Física."""
+def ID(value):
+    return By.ID, value
 
-    def __init__(self, agencia, conta, digito, senha):
-        self.agencia = agencia
-        self.conta = conta
-        self.digito = digito
-        self.senha = senha
 
-        self.session = MobileSession()
+def css(value):
+    return By.CSS_SELECTOR, value
 
-    def login(self):
-        url = 'https://ww70.itau.com.br/M/LoginPF.aspx'
 
-        # Faz um GET na url inválida de login para descobrir o parâmetro de sessão.
-        response = self.session.get(url)
-        page = FirstPage(response)
+def xpath(value):
+    return By.XPATH, value
 
-        url = page.valid_login_url()
 
-        # Faz um GET na url válida de login para exibir o formulário com campos do ASP.NET.
-        response = self.session.get(url)
-        page = LoginPage(response)
+def link_contains(value):
+    return By.PARTIAL_LINK_TEXT, value
 
-        # Faz o POST realizando o login.
-        data = page.formdata(self.agencia, self.conta, self.digito, self.senha)
-        response = self.session.post(url, data=data)
-        page = MenuPage(response)
 
-        return page
+present = EC.presence_of_element_located
+invisible = EC.invisibility_of_element_located
 
-    def extrato(self):
-        url = 'https://ww70.itau.com.br/M/SaldoExtratoLancamentos.aspx'
 
-        # Assumindo que estamos logados, faz um GET na url que lista os lançamentos.
-        # Por padrão serão mostrados lançamentos realizados nos últimos 3 dias.
-        response = self.session.get(url)
-        page = StatementPage(response)
+def js_href(el):
+    return el.get_attribute('href').partition(':')[-1]
 
-        url = page.url_max_period()
 
-        # Faz um GET para listar os lançamentos dos últimos 90 dias, que é o maior período possível.
-        response = self.session.get(url)
-        page = StatementPage(response)
+class ItauHome:
+    URL = 'https://www.itau.com.br/'
 
-        stmts = page.statements()
+    def __init__(self, driver):
+        self.driver = driver
 
-        return stmts
+    def login(self, agencia, conta, titular, password):
+        # 1. Acessa o site.
+        self.driver.get(self.URL)
 
-    def cartao(self):
-        url = 'https://ww70.itau.com.br/M/FaturaCartaoCreditoQT.aspx'
+        # 2. Preenche agência e conta.
+        el = self.driver.element
+        el(ID('campo_agencia')).send_keys(agencia)
+        el(ID('campo_conta')).send_keys(conta)
+        el(css('a.btnSubmit')).click()
 
-        # Assumindo que estamos logados, faz um GET na url que lista o menu do cartão.
-        response = self.session.get(url)
-        page = CardMenuPage(response)
+        if titular:
+            # 3. Identifica o titular
+            titular = self.driver.wait_until(present(link_contains(titular)))
+            self.driver.execute_script(js_href(titular))
+        else:
+            # 3. O titular é selecionado automaticamente e
+            # a página é redirecionada para o teclado virtual
+            self.driver.wait_until(present(
+                xpath('//strong[text()="{}"]'.format(titular))
+            ))
 
-        # Faz um GET para listar os lançåmentos atuais do cartão.
-        url = page.url_menu_current()
-        response = self.session.get(url)
-        page = CardStatement(response)
+        # 4. Clica a senha no teclado virtual.
+        submit = self.driver.wait_until(present(link_contains('acessar')))
+        self.driver.wait_until(invisible(css('div.blockUI.blockOverlay')))
 
-        summary = page.summary()
-        stmts = page.statements()
+        for digit in password:
+            self.driver.element(link_contains(digit)).click()
 
-        return summary, stmts
+        submit.click()
 
+        # 5. Aguarda carregar o dashboard.
+        self.driver.wait_until(present(xpath("//a[contains(text(),'Saldo e extrato')]")))
+
+    def go_to_extrato(self):
+        menu = self.driver.wait_until(present(xpath("//a[contains(text(),'Saldo e extrato')]")))
+        self.driver.execute_script(js_href(menu))
+
+    def go_to_ofx(self):
+        self.go_to_extrato()
+
+        with self.driver.frame('CORPO'):
+            menu = self.driver.wait_until(present(xpath("//a[contains(text(),'Salvar em outros formatos')]")))
+            self.driver.execute_script(js_href(menu))
+
+    def salvar_ofx(self, dia, mes, ano):
+        with self.driver.frame('CORPO'):
+            el = self.driver.element
+            el(ID('Dia')).send_keys(f'{dia:02}{mes:02}{ano}')
+            el(css("input[value='OFX']")).click()
+            el(xpath("//a[img[@alt='Continuar']]")).click()
+
+        with self.driver.tab():
+            paths = self.driver.wait_downloads()
+
+        return paths
+
+    def cleanup(self):
+        self.driver.quit()

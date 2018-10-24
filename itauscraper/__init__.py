@@ -1,1 +1,1 @@
-from itauscraper.scraper import ItauScraper
+from itauscraper.scraper import ItauHome
